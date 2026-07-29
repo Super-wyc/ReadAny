@@ -3,13 +3,13 @@
  * Converts PDF pages into foliate-js book format for rendering with fixed-layout renderer.
  * Uses PDF.js TextLayer for text selection support.
  */
-import * as pdfjsLib from "pdfjs-dist";
-import { WorkerMessageHandler } from "pdfjs-dist/build/pdf.worker.mjs";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import { WorkerMessageHandler } from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 
 globalThis.pdfjsWorker ??= { WorkerMessageHandler };
 
 // Configure PDF.js worker — always set to match the API version
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/legacy/build/pdf.worker.min.mjs`;
 const PDFJS_CDN_BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}`;
 const PDFJS_DOCUMENT_OPTIONS = {
   useWorkerFetch: false,

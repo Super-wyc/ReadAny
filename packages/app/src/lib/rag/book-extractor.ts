@@ -401,8 +401,8 @@ function extractBlockText(block: Element): string {
 }
 
 async function extractPdfChapters(fileBytes: Uint8Array): Promise<ChapterData[]> {
-  const pdfjsLib = await import("pdfjs-dist");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/legacy/build/pdf.worker.min.mjs`;
 
   const pdfDoc = await pdfjsLib.getDocument({
     data: new Uint8Array(fileBytes),

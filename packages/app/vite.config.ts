@@ -16,7 +16,7 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
-      "pdfjs-dist/build/pdf.worker.mjs": path.join(pdfjsDist, "build/pdf.worker.mjs"),
+      "pdfjs-dist/legacy/build/pdf.worker.mjs": path.join(pdfjsDist, "legacy/build/pdf.worker.mjs"),
       "pdfjs-dist": pdfjsDist,
       // Map @pdfjs/* to foliate-js vendored pdfjs (v4.7, compatible with foliate-js)
       "@pdfjs": path.resolve(__dirname, "../../foliate-js/vendor/pdfjs"),
