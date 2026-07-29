@@ -31,6 +31,11 @@ import { useReaderStore } from "@/stores/reader-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useTTSStore } from "@/stores/tts-store";
 import { useChapterTranslation } from "@readany/core/hooks";
+import {
+  getReaderTapThresholds,
+  getRelativeXFraction,
+  resolveReaderTapAction,
+} from "@readany/core/reader";
 import { getPlatformService } from "@readany/core/services";
 import { getCSSFontFace, useFontStore, useReadingSessionStore } from "@readany/core/stores";
 import { useRubyStore } from "@readany/core/stores/ruby-store";
@@ -209,7 +214,7 @@ async function loadAndParseBook(
 // --- Auto-hide controls hook ---
 // Strategy:
 // - Toolbar/FooterBar each have an invisible hover trigger zone (onMouseEnter → show)
-// - Inside iframe: any single-click toggles visibility (no coordinate conversion needed)
+// - Single clicks are routed by horizontal zone: navigate on the sides, toggle in the middle
 // - Tauri's window.screenX is unreliable, so we avoid screen-to-page coord mapping
 // - When clicking inside a selection, the click is not forwarded (handled in iframe-event-handlers)
 
@@ -255,22 +260,32 @@ function useAutoHideControls(
         if (data?.type !== "iframe-single-click" && data?.type !== "viewer-single-click") return;
         if (data.bookKey !== bookKey) return;
 
-        const viewWidth = containerRef.current.getBoundingClientRect().width;
+        const viewRect = containerRef.current.getBoundingClientRect();
+        const viewWidth = viewRect.width;
 
         // Use xFraction from iframe (accounts for CSS columns scroll offset).
-        // For viewer-single-click (outside iframe), compute from clientX / viewWidth.
-        let fraction: number;
+        // For viewer-single-click (outside iframe), compute relative to the reader.
+        let fraction: number | null;
         if (typeof data.xFraction === "number" && data.xFraction >= 0 && data.xFraction <= 1) {
           fraction = data.xFraction;
         } else {
-          fraction = Number(data.clientX ?? 0) / viewWidth;
+          fraction = getRelativeXFraction(Number(data.clientX), viewRect);
         }
+        if (fraction === null) return;
 
         // Double-page: left 33% = prev, right 33% = next, middle 34% = toggle
         // Single-page: left/right 40% = nav, middle 20% = toggle
-        const leftNavEnd = isDoublePage ? 0.33 : 0.4;
-        const rightNavStart = isDoublePage ? 0.67 : 0.6;
+        const { leftNavEnd, rightNavStart } = getReaderTapThresholds(
+          isDoublePage,
+          isFixedLayout,
+        );
         const source = data.type === "iframe-single-click" ? "iframe" : "shell";
+        const action = resolveReaderTapAction({
+          fraction,
+          isDoublePage,
+          isFixedLayout,
+          isScrollMode,
+        });
 
         const toggleControls = () => {
           console.log("[ReaderTap][reader:action]", {
@@ -302,31 +317,13 @@ function useAutoHideControls(
           computedFraction: fraction,
           viewWidth,
           isDoublePage,
-          isScrollMode,
           isFixedLayout,
+          isScrollMode,
           leftNavEnd,
           rightNavStart,
         });
 
-        if (isFixedLayout && !isVisible) {
-          console.log("[ReaderTap][reader:action]", {
-            bookKey,
-            source,
-            action: "show-controls",
-            fraction,
-            isDoublePage,
-          });
-          showAndScheduleHide();
-          return;
-        }
-
-        if (isScrollMode) {
-          toggleControls();
-          return;
-        }
-
-        if (fraction > leftNavEnd && fraction < rightNavStart) {
-          // Middle zone: toggle toolbar
+        if (action === "toggle-controls") {
           toggleControls();
           return;
         }
@@ -334,7 +331,7 @@ function useAutoHideControls(
         clearTimer();
         setIsVisible(false);
 
-        if (fraction <= leftNavEnd) {
+        if (action === "prev") {
           console.log("[ReaderTap][reader:action]", {
             bookKey,
             source,
@@ -370,9 +367,8 @@ function useAutoHideControls(
     onPrev,
     showAndScheduleHide,
     isDoublePage,
-    isScrollMode,
     isFixedLayout,
-    isVisible,
+    isScrollMode,
   ]);
 
   // Mouse enter/leave handlers for toolbar area
@@ -955,6 +951,8 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
 
   // Auto-hide controls
   const keepControlsVisible = showSearch || showToc || showSettings;
+  const isDoublePage = (viewSettings.paginatedLayout ?? "double") === "double";
+  const isReaderScrollMode = !isFixedLayout && viewSettings.viewMode === "scroll";
   const {
     isVisible: controlsVisible,
     handleMouseEnter,
@@ -966,11 +964,11 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
     () => foliateRef.current?.goNext(),
     2000,
     keepControlsVisible,
-    (viewSettings.paginatedLayout ?? "double") === "double",
-    viewSettings.viewMode === "scroll",
+    isDoublePage,
+    isReaderScrollMode,
     isFixedLayout,
   );
-  const isDoublePage = (viewSettings.paginatedLayout ?? "double") === "double";
+  const tapThresholds = getReaderTapThresholds(isDoublePage, isFixedLayout);
   const fixedLayoutZoom = normalizeFixedLayoutZoom(viewSettings.fixedLayoutZoom ?? 1);
   const handleFixedLayoutZoomChange = useCallback(
     (zoom: number) => {
@@ -2924,17 +2922,20 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
             <div
               id="reader-zone-prev"
               className="pointer-events-none absolute left-0 top-0 bottom-0 z-[100]"
-              style={{ width: isDoublePage ? "33%" : "40%" }}
+              style={{ width: `${tapThresholds.leftNavEnd * 100}%` }}
             />
             <div
               id="reader-zone-toolbar"
               className="pointer-events-none absolute top-0 bottom-0 z-[100]"
-              style={{ left: isDoublePage ? "33%" : "40%", width: isDoublePage ? "34%" : "20%" }}
+              style={{
+                left: `${tapThresholds.leftNavEnd * 100}%`,
+                width: `${(tapThresholds.rightNavStart - tapThresholds.leftNavEnd) * 100}%`,
+              }}
             />
             <div
               id="reader-zone-next"
               className="pointer-events-none absolute right-0 top-0 bottom-0 z-[100]"
-              style={{ width: isDoublePage ? "33%" : "40%" }}
+              style={{ width: `${(1 - tapThresholds.rightNavStart) * 100}%` }}
             />
             {bookDoc ? (
               <FoliateViewer

@@ -8,6 +8,7 @@ import type { BookDoc, BookFormat } from "@/lib/reader/document-loader";
 import { getDirection, isFixedLayoutBook } from "@/lib/reader/document-loader";
 import { getFontTheme } from "@/lib/reader/font-themes";
 import { registerIframeEventHandlers } from "@/lib/reader/iframe-event-handlers";
+import { getRelativeXFraction } from "@readany/core/reader";
 import type {
   ChapterParagraph,
   ChapterTranslationResult,
@@ -2810,13 +2811,14 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
         setFootnotePreview(null);
 
         const rect = container.getBoundingClientRect();
+        const xFraction = getRelativeXFraction(event.clientX, rect);
         console.log("[ReaderTap][shell:post]", {
           bookKey,
           clientX: event.clientX,
           clientY: event.clientY,
           containerLeft: rect.left,
           containerWidth: rect.width,
-          xFraction: rect.width > 0 ? (event.clientX - rect.left) / rect.width : null,
+          xFraction,
         });
         window.postMessage(
           {
@@ -2826,6 +2828,7 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
             clientY: event.clientY,
             screenX: event.screenX,
             screenY: event.screenY,
+            ...(xFraction !== null ? { xFraction } : {}),
           },
           "*",
         );

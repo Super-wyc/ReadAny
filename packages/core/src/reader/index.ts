@@ -17,6 +17,18 @@ export {
 } from "./pagination";
 export type { PageDirection } from "./pagination";
 
+// Pointer/tap navigation
+export {
+  getReaderTapThresholds,
+  getRelativeXFraction,
+  resolveReaderTapAction,
+} from "./tap-navigation";
+export type {
+  ReaderTapAction,
+  ReaderTapBounds,
+  ResolveReaderTapActionOptions,
+} from "./tap-navigation";
+
 // Progress tracking
 export { createProgressTracker, estimateTimeToFinish } from "./progress";
 export type { ProgressData } from "./progress";
