@@ -92,6 +92,7 @@ describe("reader tap navigation", () => {
       resolveReaderTapAction({
         fraction: 0.9,
         isDoublePage: true,
+        isFixedLayout: true,
         isScrollMode: true,
       }),
     ).toBe("toggle-controls");

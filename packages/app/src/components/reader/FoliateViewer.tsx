@@ -1845,6 +1845,34 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
         // Register iframe event handlers for this section
         registerIframeEventHandlers(bookKey, detail.doc);
 
+        // A wheel event dispatched inside an iframe does not reliably scroll the
+        // fixed-layout host in WebKit. Bridge it directly while PDF/CBZ is in
+        // continuous mode, and suppress the old edge-to-next-page behavior.
+        const fixedScrollDoc = detail.doc as Document & {
+          __readany_fixed_scroll_wheel_registered?: boolean;
+        };
+        if (isFixedLayout && !fixedScrollDoc.__readany_fixed_scroll_wheel_registered) {
+          fixedScrollDoc.__readany_fixed_scroll_wheel_registered = true;
+          fixedScrollDoc.addEventListener(
+            "wheel",
+            (wheelEvent) => {
+              const renderer = viewRef.current?.renderer as HTMLElement | undefined;
+              if (!renderer?.scrollBy || !viewRef.current?.renderer?.scrolled) return;
+
+              wheelEvent.preventDefault();
+              const pageSize = Math.max(1, renderer.clientHeight);
+              const unit =
+                wheelEvent.deltaMode === 1 ? 16 : wheelEvent.deltaMode === 2 ? pageSize : 1;
+              renderer.scrollBy({
+                top: wheelEvent.deltaY * unit,
+                left: wheelEvent.deltaX * unit,
+                behavior: "auto",
+              });
+            },
+            { passive: false },
+          );
+        }
+
         // Attach selection listener
         attachSelectionListener(detail.doc);
 
@@ -3105,17 +3133,63 @@ function applyRendererSettings(
   if (!renderer) return;
 
   if (isFixedLayout) {
+    const isScrollMode = settings.viewMode === "scroll";
+    const wasScrollMode = Boolean(renderer.scrolled);
+    const modeChanging = wasScrollMode !== isScrollMode;
+    const rendererLocation = renderer.currentLocation as
+      | { index?: number; fraction?: number }
+      | undefined;
+    const fallbackIndex =
+      typeof renderer.primaryIndex === "number" && renderer.primaryIndex >= 0
+        ? renderer.primaryIndex
+        : view.lastLocation?.section?.current;
+    const preservedLocation = {
+      index:
+        typeof rendererLocation?.index === "number" && rendererLocation.index >= 0
+          ? rendererLocation.index
+          : fallbackIndex,
+      fraction: rendererLocation?.fraction ?? 0,
+    };
     const isSinglePage = (settings.paginatedLayout ?? "double") === "single";
     const spreadMode = isSinglePage ? "none" : "auto";
     // Fixed layout: single-page mode should scale to the page width so image-only
     // EPUBs do not look "shrunk inside a spread". Double-page mode still uses
     // fit-page to keep both pages fully visible inside the viewport.
-    renderer.setAttribute("zoom", isSinglePage ? "fit-width" : "fit-page");
-    renderer.setAttribute("zoom-factor", String(settings.fixedLayoutZoom ?? 1));
+    const zoomMode = isScrollMode || isSinglePage ? "fit-width" : "fit-page";
+    if (renderer.getAttribute("zoom") !== zoomMode) {
+      renderer.setAttribute("zoom", zoomMode);
+    }
+    const zoomFactor = String(settings.fixedLayoutZoom ?? 1);
+    if (renderer.getAttribute("zoom-factor") !== zoomFactor) {
+      renderer.setAttribute("zoom-factor", zoomFactor);
+    }
     if (view.book?.rendition) {
       view.book.rendition.spread = spreadMode;
     }
-    renderer.setAttribute("spread", spreadMode);
+    // Apply spread first so a continuous layout is built with the requested
+    // one- or two-page row structure from its first frame.
+    if (renderer.getAttribute("spread") !== spreadMode) {
+      renderer.setAttribute("spread", spreadMode);
+    }
+    if (isScrollMode) {
+      if (renderer.getAttribute("flow") !== "scrolled") {
+        renderer.setAttribute("flow", "scrolled");
+      }
+    } else {
+      if (renderer.hasAttribute("flow")) {
+        renderer.removeAttribute("flow");
+      }
+    }
+    if (
+      modeChanging &&
+      typeof preservedLocation.index === "number" &&
+      preservedLocation.index >= 0 &&
+      typeof renderer.restoreLocation === "function"
+    ) {
+      void renderer.restoreLocation(preservedLocation, "layout").catch((error: unknown) => {
+        console.warn("[FoliateViewer] Failed to restore fixed-layout position:", error);
+      });
+    }
   } else {
     // Reflowable: columns, sizes, margins
     const isSinglePage = (settings.paginatedLayout ?? "double") === "single";

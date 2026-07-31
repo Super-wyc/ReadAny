@@ -952,7 +952,7 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
   // Auto-hide controls
   const keepControlsVisible = showSearch || showToc || showSettings;
   const isDoublePage = (viewSettings.paginatedLayout ?? "double") === "double";
-  const isReaderScrollMode = !isFixedLayout && viewSettings.viewMode === "scroll";
+  const isReaderScrollMode = viewSettings.viewMode === "scroll";
   const {
     isVisible: controlsVisible,
     handleMouseEnter,

@@ -29,7 +29,7 @@ const getViewport = (doc, viewport) => {
 };
 
 export class FixedLayout extends HTMLElement {
-  static observedAttributes = ["zoom", "zoom-factor", "spread"];
+  static observedAttributes = ["zoom", "zoom-factor", "spread", "flow"];
   #root = this.attachShadow({ mode: "closed" });
   #observer = new ResizeObserver(() => this.#render());
   #spreads;
@@ -43,6 +43,18 @@ export class FixedLayout extends HTMLElement {
   #side;
   #zoom;
   #zoomFactor = 1;
+  #scrollStack;
+  #scrollSlots = [];
+  #scrollRows = [];
+  #continuousFrames = new Map();
+  #continuousLoads = new Map();
+  #continuousGeneration = 0;
+  #continuousIndex = -1;
+  #continuousInitialized = false;
+  #locationIndex = -1;
+  #locationFraction = 0;
+  #scrollTimer;
+  #modePromise = Promise.resolve();
   constructor() {
     super();
 
@@ -55,11 +67,54 @@ export class FixedLayout extends HTMLElement {
             justify-content: safe center;
             align-items: safe center;
             overflow: auto;
+        }
+        :host([flow="scrolled"]) {
+            display: block;
+            box-sizing: border-box;
+            padding: 20px 0 32px;
+            overflow: auto;
+            overscroll-behavior: contain;
+            scrollbar-gutter: stable;
+        }
+        #scroll-stack {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+            width: max-content;
+            min-width: 100%;
+            margin: 0 auto;
+        }
+        .scroll-row {
+            display: flex;
+            flex: none;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 16px;
+            width: max-content;
+        }
+        .scroll-slot {
+            position: relative;
+            flex: none;
+            overflow: hidden;
+            background: #fff;
+            box-shadow: 0 1px 5px rgba(0, 0, 0, .16);
+        }
+        .scroll-placeholder {
+            flex: none;
         }`);
 
     this.#observer.observe(this);
+    this.addEventListener("scroll", () => {
+      if (!this.scrolled || !this.#continuousInitialized) return;
+      if (this.#scrollTimer) clearTimeout(this.#scrollTimer);
+      this.#scrollTimer = setTimeout(() => {
+        this.#scrollTimer = null;
+        this.#updateContinuousLocation("scroll");
+      }, 80);
+    });
   }
-  attributeChangedCallback(name, _, value) {
+  attributeChangedCallback(name, oldValue, value) {
     switch (name) {
       case "zoom":
         this.#zoom =
@@ -74,7 +129,10 @@ export class FixedLayout extends HTMLElement {
       }
       case "spread":
         this.spread = value;
-        void this.#applySpreadChange(value);
+        this.#modePromise = this.#applySpreadChange(value);
+        break;
+      case "flow":
+        this.#modePromise = this.#applyFlowChange(value, oldValue);
         break;
     }
   }
@@ -118,10 +176,30 @@ export class FixedLayout extends HTMLElement {
   }
   async #applySpreadChange(value) {
     if (!this.book?.sections?.length) return;
+    const location = this.#captureLocation(this.scrolled);
+    const initialized = this.scrolled
+      ? this.#continuousInitialized
+      : location.index >= 0 || this.#locationIndex >= 0;
     if (this.book.rendition) this.book.rendition.spread = value;
-
-    const currentSection = this.book.sections[this.index] ?? this.book.sections[0];
     this.#spreads = this.#buildSpreads(this.book);
+
+    if (this.scrolled) {
+      this.#continuousGeneration += 1;
+      this.#clearRenderedContent();
+      await this.#showContinuous(
+        location.index >= 0 ? location.index : 0,
+        initialized,
+        location.fraction,
+      );
+      return;
+    }
+
+    if (location.index < 0) {
+      this.#index = -1;
+      return;
+    }
+
+    const currentSection = this.book.sections[location.index];
     const target = currentSection ? this.getSpreadOf(currentSection) : null;
     this.#index = -1;
     await this.goToSpread(
@@ -130,7 +208,132 @@ export class FixedLayout extends HTMLElement {
       "layout",
     );
   }
-  async #createFrame({ index, src: srcOption }) {
+
+  #getPaginatedIndex() {
+    const spread = this.#spreads?.[this.#index];
+    if (!spread) return -1;
+    const section =
+      spread?.center ??
+      (this.#side === "left" ? (spread.left ?? spread.right) : (spread.right ?? spread.left));
+    return this.book.sections.indexOf(section);
+  }
+
+  #getContinuousIndexAtViewport() {
+    if (!this.#scrollSlots.length) return this.#continuousIndex;
+
+    const hostRect = this.getBoundingClientRect();
+    const viewportCenter = hostRect.top + this.clientHeight / 2;
+    const currentSlot = this.#scrollSlots[this.#continuousIndex];
+    if (currentSlot) {
+      const currentRect = currentSlot.getBoundingClientRect();
+      if (viewportCenter >= currentRect.top && viewportCenter < currentRect.bottom) {
+        return this.#continuousIndex;
+      }
+    }
+
+    let index = this.#continuousIndex >= 0 ? this.#continuousIndex : 0;
+    for (let i = 0; i < this.#scrollSlots.length; i += 1) {
+      const slot = this.#scrollSlots[i];
+      if (!slot) continue;
+      if (viewportCenter < slot.getBoundingClientRect().bottom) return i;
+      index = i;
+    }
+    return index;
+  }
+
+  #getContinuousFraction(index) {
+    const slot = this.#scrollSlots[index];
+    if (!slot) return this.#locationFraction;
+    const hostRect = this.getBoundingClientRect();
+    const slotRect = slot.getBoundingClientRect();
+    if (!slotRect.height) return this.#locationFraction;
+    return Math.max(0, Math.min(1, (hostRect.top + 20 - slotRect.top) / slotRect.height));
+  }
+
+  #setContinuousLocation(index, fraction = 0) {
+    const slot = this.#scrollSlots[index];
+    if (!slot) return;
+    const hostRect = this.getBoundingClientRect();
+    const slotRect = slot.getBoundingClientRect();
+    const delta = slotRect.top - hostRect.top - 20 + fraction * slotRect.height;
+    this.scrollTop = Math.max(0, this.scrollTop + delta);
+  }
+
+  async #restoreContinuousLocation(index, fraction = 0) {
+    // WebKit may run ResizeObserver callbacks for the newly-created rows after
+    // the first scroll assignment. Reapply on the next two frames so the final
+    // position is based on settled geometry rather than stale offsetTop values.
+    this.#setContinuousLocation(index, fraction);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    this.#setContinuousLocation(index, fraction);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    this.#setContinuousLocation(index, fraction);
+  }
+
+  #captureLocation(scrolled = this.scrolled) {
+    if (scrolled && this.#continuousInitialized) {
+      const index = this.#getContinuousIndexAtViewport();
+      if (index >= 0) {
+        return { index, fraction: this.#getContinuousFraction(index) };
+      }
+    }
+
+    if (!scrolled) {
+      const index = this.#getPaginatedIndex();
+      if (index >= 0) return { index, fraction: 0 };
+    }
+
+    return { index: this.#locationIndex, fraction: this.#locationFraction };
+  }
+
+  async #applyFlowChange(value, oldValue) {
+    if (!this.book?.sections?.length) return;
+
+    const wasScrolled = oldValue === "scrolled";
+    const location = this.#captureLocation(wasScrolled);
+    const initialized = wasScrolled
+      ? this.#continuousInitialized
+      : location.index >= 0 || this.#locationIndex >= 0;
+    this.#continuousGeneration += 1;
+    this.#clearRenderedContent();
+
+    if (value === "scrolled") {
+      await this.#showContinuous(
+        location.index >= 0 ? location.index : 0,
+        initialized,
+        location.fraction,
+      );
+      return;
+    }
+
+    this.#continuousInitialized = false;
+    this.#continuousIndex = -1;
+    this.#spreads = this.#buildSpreads(this.book);
+    this.#index = -1;
+    if (!initialized || location.index < 0) return;
+
+    const currentSection = this.book.sections[location.index];
+    const target = currentSection ? this.getSpreadOf(currentSection) : null;
+    await this.goToSpread(
+      target?.index ?? 0,
+      target?.side ?? (this.rtl ? "right" : "left"),
+      "layout",
+    );
+  }
+
+  #clearRenderedContent() {
+    this.#root.replaceChildren();
+    this.#left = null;
+    this.#right = null;
+    this.#center = null;
+    this.#scrollStack = null;
+    this.#scrollSlots = [];
+    this.#scrollRows = [];
+    this.#continuousFrames.clear();
+    this.#continuousLoads.clear();
+  }
+
+  async #createFrame({ index, src: srcOption }, mount = this.#root) {
     const srcOptionIsString = typeof srcOption === "string";
     const src = srcOptionIsString ? srcOption : srcOption?.src;
     const onZoom = srcOptionIsString ? null : srcOption?.onZoom;
@@ -148,8 +351,8 @@ export class FixedLayout extends HTMLElement {
     iframe.setAttribute("sandbox", "allow-same-origin allow-scripts");
     iframe.setAttribute("scrolling", "no");
     iframe.setAttribute("part", "filter");
-    this.#root.append(element);
-    if (!src) return { blank: true, element, iframe };
+    mount.append(element);
+    if (!src) return { blank: true, element, iframe, index };
     return new Promise((resolve) => {
       iframe.addEventListener(
         "load",
@@ -163,6 +366,7 @@ export class FixedLayout extends HTMLElement {
             width: Number.parseFloat(width),
             height: Number.parseFloat(height),
             onZoom,
+            index,
           });
         },
         { once: true },
@@ -170,7 +374,221 @@ export class FixedLayout extends HTMLElement {
       iframe.src = src;
     });
   }
+
+  get scrolled() {
+    return this.getAttribute("flow") === "scrolled";
+  }
+
+  get currentLocation() {
+    return this.#captureLocation(this.scrolled);
+  }
+
+  #resizeContinuousRow(row) {
+    const fallbackWidth = Number(this.defaultViewport?.width) || 1000;
+    const fallbackHeight = Number(this.defaultViewport?.height) || 1400;
+    const realItem = row.items.find(({ slot }) => slot);
+    const referenceWidth = Number(realItem?.slot?.dataset.pageWidth) || fallbackWidth;
+    const referenceHeight = Number(realItem?.slot?.dataset.pageHeight) || fallbackHeight;
+    const dimensions = row.items.map(({ slot }) => ({
+      width: Number(slot?.dataset.pageWidth) || referenceWidth,
+      height: Number(slot?.dataset.pageHeight) || referenceHeight,
+    }));
+    const gap = row.items.length > 1 ? 16 * (row.items.length - 1) : 0;
+    const contentWidth = dimensions.reduce((sum, { width }) => sum + width, 0);
+    const { width } = this.getBoundingClientRect();
+    const availableWidth = Math.max(1, width - 40 - gap);
+    const scale = (availableWidth / Math.max(1, contentWidth)) * this.#zoomFactor;
+
+    row.items.forEach(({ element, slot }, itemIndex) => {
+      const { width: pageWidth, height: pageHeight } = dimensions[itemIndex];
+      Object.assign(element.style, {
+        width: `${pageWidth * scale}px`,
+        height: `${pageHeight * scale}px`,
+      });
+      if (slot) slot.dataset.scale = String(scale);
+    });
+    return scale;
+  }
+
+  #renderContinuousRow(row) {
+    if (!row) return;
+    const scale = this.#resizeContinuousRow(row);
+    for (const { index } of row.items) {
+      const frame = this.#continuousFrames.get(index);
+      if (!frame?.iframe || frame.blank) continue;
+      if (frame.onZoom) frame.onZoom({ doc: frame.iframe.contentDocument, scale });
+      const iframeScale = frame.onZoom ? scale : 1;
+      Object.assign(frame.iframe.style, {
+        width: `${frame.width * iframeScale}px`,
+        height: `${frame.height * iframeScale}px`,
+        transform: frame.onZoom ? "none" : `scale(${scale})`,
+        transformOrigin: "top left",
+        display: "block",
+      });
+      Object.assign(frame.element.style, {
+        width: `${frame.width * scale}px`,
+        height: `${frame.height * scale}px`,
+        overflow: "hidden",
+        display: "block",
+      });
+    }
+  }
+
+  #renderContinuousFrame(frame) {
+    if (!frame?.iframe || frame.blank) return;
+    const slot = this.#scrollSlots[frame.index];
+    if (!slot) return;
+    slot.dataset.pageWidth = String(frame.width);
+    slot.dataset.pageHeight = String(frame.height);
+    this.#renderContinuousRow(this.#scrollRows[Number(slot.dataset.rowIndex)]);
+  }
+
+  #renderContinuous() {
+    if (!this.#scrollSlots.length) return;
+    const anchorSlot = this.#scrollSlots[Math.max(0, this.#continuousIndex)];
+    const hostTop = this.getBoundingClientRect().top;
+    const anchorOffset = anchorSlot ? anchorSlot.getBoundingClientRect().top - hostTop : 0;
+
+    for (const row of this.#scrollRows) this.#renderContinuousRow(row);
+
+    if (anchorSlot && this.#continuousInitialized) {
+      requestAnimationFrame(() => {
+        const nextOffset =
+          anchorSlot.getBoundingClientRect().top - this.getBoundingClientRect().top;
+        this.scrollTop = Math.max(0, this.scrollTop + nextOffset - anchorOffset);
+      });
+    }
+  }
+
+  async #showContinuous(index, initialized, fraction = 0) {
+    const generation = this.#continuousGeneration;
+    const fallbackWidth = Number(this.defaultViewport?.width) || 1000;
+    const fallbackHeight = Number(this.defaultViewport?.height) || 1400;
+    const stack = document.createElement("div");
+    stack.id = "scroll-stack";
+
+    this.#scrollStack = stack;
+    this.#scrollSlots = Array(this.book.sections.length);
+    this.#scrollRows = this.#spreads.map((spread, rowIndex) => {
+      const rowElement = document.createElement("div");
+      rowElement.className = "scroll-row";
+      const sections = spread.center ? [spread.center] : [spread.left, spread.right];
+      const items = sections.map((section) => {
+        const pageIndex = this.book.sections.indexOf(section);
+        const element = document.createElement("div");
+        if (pageIndex < 0) {
+          element.className = "scroll-placeholder";
+          rowElement.append(element);
+          return { element, index: -1, slot: null };
+        }
+
+        element.className = "scroll-slot";
+        element.dataset.index = String(pageIndex);
+        element.dataset.rowIndex = String(rowIndex);
+        element.dataset.pageWidth = String(fallbackWidth);
+        element.dataset.pageHeight = String(fallbackHeight);
+        this.#scrollSlots[pageIndex] = element;
+        rowElement.append(element);
+        return { element, index: pageIndex, slot: element };
+      });
+      const row = { element: rowElement, items };
+      stack.append(rowElement);
+      return row;
+    });
+    this.#root.append(stack);
+    for (const row of this.#scrollRows) this.#resizeContinuousRow(row);
+
+    const targetIndex = Math.max(0, Math.min(this.book.sections.length - 1, index));
+    this.#continuousIndex = initialized ? targetIndex : -1;
+    this.#continuousInitialized = initialized;
+    await this.#loadContinuousWindow(targetIndex, generation);
+    if (generation !== this.#continuousGeneration) return;
+
+    if (initialized) {
+      await this.#restoreContinuousLocation(targetIndex, fraction);
+      if (generation !== this.#continuousGeneration) return;
+      this.#reportLocation("layout");
+    }
+  }
+
+  async #loadContinuousPage(index, generation = this.#continuousGeneration) {
+    if (
+      generation !== this.#continuousGeneration ||
+      index < 0 ||
+      index >= this.book.sections.length ||
+      this.#continuousFrames.has(index)
+    ) {
+      return;
+    }
+    if (this.#continuousLoads.has(index)) return this.#continuousLoads.get(index);
+
+    const loadPromise = (async () => {
+      const src = await this.book.sections[index]?.load?.();
+      if (generation !== this.#continuousGeneration || !this.scrolled) return;
+      const slot = this.#scrollSlots[index];
+      if (!slot) return;
+
+      slot.replaceChildren();
+      const frame = await this.#createFrame({ index, src }, slot);
+      if (generation !== this.#continuousGeneration || !this.scrolled) {
+        frame.element.remove();
+        return;
+      }
+      this.#continuousFrames.set(index, frame);
+      this.#renderContinuousFrame(frame);
+
+      if (Math.abs(index - this.#continuousIndex) > 4 && this.#continuousInitialized) {
+        frame.element.remove();
+        this.#continuousFrames.delete(index);
+      }
+    })().finally(() => {
+      this.#continuousLoads.delete(index);
+    });
+    this.#continuousLoads.set(index, loadPromise);
+    return loadPromise;
+  }
+
+  async #loadContinuousWindow(index, generation = this.#continuousGeneration) {
+    const start = Math.max(0, index - 2);
+    const end = Math.min(this.book.sections.length - 1, index + 3);
+    await Promise.all(
+      Array.from({ length: end - start + 1 }, (_, offset) =>
+        this.#loadContinuousPage(start + offset, generation),
+      ),
+    );
+
+    if (generation !== this.#continuousGeneration) return;
+    for (const [pageIndex, frame] of this.#continuousFrames) {
+      if (pageIndex < index - 4 || pageIndex > index + 5) {
+        frame.element.remove();
+        this.#continuousFrames.delete(pageIndex);
+      }
+    }
+  }
+
+  #updateContinuousLocation(reason) {
+    if (!this.scrolled || !this.#continuousInitialized || !this.#scrollSlots.length) return;
+    const index = this.#getContinuousIndexAtViewport();
+    this.#continuousIndex = index;
+    void this.#loadContinuousWindow(index);
+    this.#reportLocation(reason);
+  }
+
+  async #goToContinuousIndex(index, reason = "navigation") {
+    const targetIndex = Math.max(0, Math.min(this.book.sections.length - 1, index));
+    this.#continuousInitialized = true;
+    this.#continuousIndex = targetIndex;
+    await this.#loadContinuousWindow(targetIndex);
+    await this.#restoreContinuousLocation(targetIndex, 0);
+    this.#locationFraction = 0;
+    this.#reportLocation(reason);
+  }
+
   #render(side = this.#side) {
+    if (this.scrolled) {
+      this.#renderContinuous();
+      return;
+    }
     if (!side) return;
     const left = this.#left ?? {};
     const right = this.#center ?? this.#right ?? {};
@@ -234,7 +652,7 @@ export class FixedLayout extends HTMLElement {
     }
   }
   async #showSpread({ left, right, center, side }) {
-    this.#root.replaceChildren();
+    this.#clearRenderedContent();
     this.#left = null;
     this.#right = null;
     this.#center = null;
@@ -279,17 +697,29 @@ export class FixedLayout extends HTMLElement {
     this.#spreads = this.#buildSpreads(book);
   }
   get index() {
-    const spread = this.#spreads[this.#index];
-    if (!spread) return -1;
-    const section =
-      spread?.center ??
-      (this.#side === "left" ? (spread.left ?? spread.right) : (spread.right ?? spread.left));
-    return this.book.sections.indexOf(section);
+    if (this.scrolled) return this.#continuousIndex;
+    return this.#getPaginatedIndex();
+  }
+  get primaryIndex() {
+    return this.index;
   }
   #reportLocation(reason) {
+    const index = this.index;
+    if (index < 0) return;
+    let fraction = 0;
+    let size = 1;
+    if (this.scrolled) {
+      const slot = this.#scrollSlots[index];
+      if (slot?.offsetHeight) {
+        fraction = this.#getContinuousFraction(index);
+        size = Math.max(0, Math.min(1, this.clientHeight / slot.offsetHeight));
+      }
+    }
+    this.#locationIndex = index;
+    this.#locationFraction = fraction;
     this.dispatchEvent(
       new CustomEvent("relocate", {
-        detail: { reason, range: null, index: this.index, fraction: 0, size: 1 },
+        detail: { reason, range: null, index, fraction, size },
       }),
     );
   }
@@ -329,10 +759,33 @@ export class FixedLayout extends HTMLElement {
     await this.goTo(target);
     // TODO
   }
+  async restoreLocation(location, reason = "layout") {
+    await this.#modePromise;
+    if (!location || typeof location.index !== "number") return;
+    const index = Math.max(0, Math.min(this.book.sections.length - 1, location.index));
+    if (this.scrolled) {
+      this.#continuousInitialized = true;
+      this.#continuousIndex = index;
+      await this.#loadContinuousWindow(index);
+      await this.#restoreContinuousLocation(index, location.fraction ?? 0);
+      this.#reportLocation(reason);
+      return;
+    }
+
+    const section = this.book.sections[index];
+    const spread = section ? this.getSpreadOf(section) : null;
+    if (!spread) return;
+    await this.goToSpread(spread.index, spread.side, reason);
+  }
   async goTo(target) {
+    await this.#modePromise;
     const { book } = this;
     const resolved = await target;
     if (!resolved || typeof resolved.index !== "number") return;
+    if (this.scrolled) {
+      await this.#goToContinuousIndex(resolved.index);
+      return;
+    }
     const section = book.sections[resolved.index];
     if (!section) return;
     const spread = this.getSpreadOf(section);
@@ -340,22 +793,44 @@ export class FixedLayout extends HTMLElement {
     const { index, side } = spread;
     await this.goToSpread(index, side);
   }
-  async next() {
+  async next(distance) {
+    await this.#modePromise;
+    if (this.scrolled) {
+      if (!this.#continuousInitialized) return this.#goToContinuousIndex(0, "page");
+      const amount = Number.isFinite(distance) ? distance : Math.max(1, this.clientHeight - 96);
+      this.scrollBy({ top: amount, behavior: "smooth" });
+      return;
+    }
     const s = this.rtl ? this.#goLeft() : this.#goRight();
     if (!s) return this.goToSpread(this.#index + 1, this.rtl ? "right" : "left", "page");
   }
-  async prev() {
+  async prev(distance) {
+    await this.#modePromise;
+    if (this.scrolled) {
+      if (!this.#continuousInitialized) return this.#goToContinuousIndex(0, "page");
+      const amount = Number.isFinite(distance) ? distance : Math.max(1, this.clientHeight - 96);
+      this.scrollBy({ top: -amount, behavior: "smooth" });
+      return;
+    }
     const s = this.rtl ? this.#goRight() : this.#goLeft();
     if (!s) return this.goToSpread(this.#index - 1, this.rtl ? "left" : "right", "page");
   }
   getContents() {
-    return Array.from(this.#root.querySelectorAll("iframe"), (frame) => ({
-      doc: frame.contentDocument,
-      // TODO: index, overlayer
-    }));
+    if (this.scrolled) {
+      return Array.from(this.#continuousFrames, ([index, frame]) => ({
+        doc: frame.iframe.contentDocument,
+        index,
+      })).sort((a, b) => a.index - b.index);
+    }
+    return [this.#left, this.#right, this.#center]
+      .filter((frame) => frame?.iframe && !frame.blank)
+      .map((frame) => ({ doc: frame.iframe.contentDocument, index: frame.index }));
   }
   destroy() {
     this.#observer.unobserve(this);
+    this.#continuousGeneration += 1;
+    if (this.#scrollTimer) clearTimeout(this.#scrollTimer);
+    this.#clearRenderedContent();
   }
 }
 
