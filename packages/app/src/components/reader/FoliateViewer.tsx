@@ -1939,8 +1939,9 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
         setFootnotePreview(null);
         onRelocate?.(detail);
 
-        // Update reading context service
-        if (detail.tocItem?.label && detail.fraction !== undefined) {
+        // Update reading context service. Fixed-layout documents such as PDFs may
+        // not have a TOC, so the reading context must not depend on a TOC label.
+        if (detail.fraction !== undefined) {
           // Extract visible text from the current page using precise viewport detection
           let surroundingText = "";
           try {
@@ -2011,22 +2012,31 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
             // Ignore extraction errors
           }
 
+          const currentPage =
+            detail.page?.current ??
+            (isFixedLayout && detail.section ? detail.section.current + 1 : undefined);
+
           readingContextService.updateContext({
             bookId: bookKey,
-            currentChapter: {
-              index: detail.section?.current ?? 0,
-              title: detail.tocItem.label,
-              href: detail.tocItem.href || "",
-            },
+            ...(detail.tocItem?.label
+              ? {
+                  currentChapter: {
+                    index: detail.section?.current ?? 0,
+                    title: detail.tocItem.label,
+                    href: detail.tocItem.href || "",
+                  },
+                }
+              : {}),
             currentPosition: {
               cfi: detail.cfi || "",
               percentage: detail.fraction * 100,
+              page: currentPage,
             },
             surroundingText,
           });
         }
       },
-      [onRelocate, bookKey],
+      [onRelocate, bookKey, isFixedLayout],
     );
     const relocateHandlerRef = useRef(relocateHandlerImpl);
     relocateHandlerRef.current = relocateHandlerImpl;

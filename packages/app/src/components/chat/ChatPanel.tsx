@@ -461,7 +461,7 @@ export function ChatPanel({ book, onNavigateToCitation }: ChatPanelProps) {
                   t("chat.aiAssistant")}
               </p>
               <p className="mt-0.5 truncate text-[10px] text-muted-foreground">
-                {Math.round(activeReaderContext.currentPosition.percentage * 100)}%
+                {Math.round(activeReaderContext.currentPosition.percentage)}%
                 {activeReaderContext.selection?.text ? " · selected text ready" : ""}
               </p>
             </div>
