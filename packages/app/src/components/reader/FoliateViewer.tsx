@@ -1879,9 +1879,6 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
         // Attach selection listener
         attachSelectionListener(detail.doc);
 
-        setLoading(false);
-        onLoaded?.();
-
         // Notify parent that a section has loaded (for re-rendering annotations)
         // This is critical: when switching chapters, foliate-js reloads the content
         // and all annotations need to be re-added
@@ -1911,7 +1908,7 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
           }
         })();
       },
-      [appTheme, bookKey, viewSettings, onLoaded, onSectionLoad, isFixedLayout],
+      [appTheme, bookKey, viewSettings, onSectionLoad, isFixedLayout],
     );
     const docLoadHandlerRef = useRef(docLoadHandlerImpl);
     docLoadHandlerRef.current = docLoadHandlerImpl;
@@ -2687,8 +2684,22 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
             onTocReady?.(toc);
           }
 
+          // Resolve a fixed-layout scroll target before enabling continuous flow.
+          // Without this seed, the renderer builds its first window around page one
+          // and only moves to lastLocation after that initial window has loaded.
+          const initialFixedScrollLocation =
+            isFixedLayout && viewSettings.viewMode === "scroll" && lastLocation
+              ? resolveFixedLayoutLocation(view, lastLocation)
+              : null;
+
           // Apply renderer settings
-          applyRendererSettings(view, viewSettings, isFixedLayout, appTheme);
+          applyRendererSettings(
+            view,
+            viewSettings,
+            isFixedLayout,
+            appTheme,
+            initialFixedScrollLocation,
+          );
 
           // IMPORTANT: Register event listeners BEFORE navigation to avoid race condition.
           // React's useFoliateEvents relies on viewReady state, but setState + re-render
@@ -2704,10 +2715,10 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
           view.addEventListener("link", linkHandler);
           setViewReady(true);
 
-          // Navigate to last location or start
-          if (isFixedLayout) {
-            await view.init({});
-          } else if (lastLocation) {
+          // Restore the saved location before applying format-specific start behavior.
+          // Fixed-layout books (PDF/CBZ) use section-based fake CFIs that view.init()
+          // can resolve, so skipping lastLocation here would always reopen page one.
+          if (lastLocation) {
             try {
               await view.init({ lastLocation });
             } catch (initErr) {
@@ -2715,8 +2726,14 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
                 "[FoliateViewer] Failed to init with lastLocation, falling back to start:",
                 initErr,
               );
-              await view.goToFraction(0);
+              if (isFixedLayout) {
+                await view.init({});
+              } else {
+                await view.goToFraction(0);
+              }
             }
+          } else if (isFixedLayout) {
+            await view.init({});
           } else {
             await view.goToFraction(0);
 
@@ -2738,6 +2755,13 @@ export const FoliateViewer = forwardRef<FoliateViewerHandle, FoliateViewerProps>
               console.warn("[FoliateViewer] Failed to skip empty first section:", skipErr);
             }
           }
+
+          // A fixed-layout renderer in continuous-scroll mode briefly prepares its
+          // initial window around page one before view.init() restores lastLocation.
+          // Keep the loading overlay visible until that restoration has fully settled
+          // so the intermediate page is never exposed to the reader.
+          setLoading(false);
+          onLoaded?.();
         } catch (err) {
           console.error("[FoliateViewer] Failed to open book:", err);
           onError?.(err instanceof Error ? err : new Error("Failed to open book"));
@@ -3131,6 +3155,7 @@ function applyRendererSettings(
   settings: ViewSettings,
   isFixedLayout: boolean,
   theme: AppTheme,
+  initialFixedScrollLocation?: { index: number; fraction: number } | null,
 ) {
   const renderer = view.renderer;
   if (!renderer) return;
@@ -3174,6 +3199,13 @@ function applyRendererSettings(
     if (renderer.getAttribute("spread") !== spreadMode) {
       renderer.setAttribute("spread", spreadMode);
     }
+    if (
+      isScrollMode &&
+      initialFixedScrollLocation &&
+      typeof renderer.setInitialLocation === "function"
+    ) {
+      renderer.setInitialLocation(initialFixedScrollLocation);
+    }
     if (isScrollMode) {
       if (renderer.getAttribute("flow") !== "scrolled") {
         renderer.setAttribute("flow", "scrolled");
@@ -3207,6 +3239,26 @@ function applyRendererSettings(
 
   // Apply CSS styles (skip font overrides for fixed layout)
   applyRendererStyles(view, settings, isFixedLayout, theme);
+}
+
+function resolveFixedLayoutLocation(
+  view: FoliateView,
+  location: string,
+): { index: number; fraction: number } | null {
+  try {
+    const resolved = view.resolveNavigation?.(location) as
+      | { index?: number; anchor?: unknown }
+      | null
+      | undefined;
+    if (typeof resolved?.index !== "number" || !Number.isFinite(resolved.index)) return null;
+    return {
+      index: Math.max(0, Math.trunc(resolved.index)),
+      fraction: typeof resolved.anchor === "number" ? resolved.anchor : 0,
+    };
+  } catch (error) {
+    console.warn("[FoliateViewer] Failed to resolve initial fixed-layout location:", error);
+    return null;
+  }
 }
 
 function applyReflowLayoutSettings(view: FoliateView, settings: ViewSettings) {

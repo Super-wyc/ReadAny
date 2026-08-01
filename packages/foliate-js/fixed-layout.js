@@ -696,6 +696,14 @@ export class FixedLayout extends HTMLElement {
 
     this.#spreads = this.#buildSpreads(book);
   }
+  setInitialLocation(location) {
+    if (!this.book?.sections?.length || !location || typeof location.index !== "number") return;
+    this.#locationIndex = Math.max(
+      0,
+      Math.min(this.book.sections.length - 1, location.index),
+    );
+    this.#locationFraction = Math.max(0, Math.min(1, location.fraction ?? 0));
+  }
   get index() {
     if (this.scrolled) return this.#continuousIndex;
     return this.#getPaginatedIndex();
