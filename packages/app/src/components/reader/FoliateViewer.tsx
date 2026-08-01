@@ -3406,21 +3406,20 @@ function applyRendererStyles(
   theme: AppTheme,
 ) {
   const renderer = view.renderer;
-  if (!renderer?.setStyles) return;
+  if (!renderer) return;
 
   const colors = getThemeColors(theme);
   const bgColor = colors.bg;
 
   if (isFixedLayout) {
-    // Fixed layout (PDF/CBZ): only set background, don't override font/size/lineHeight
-    // as it would break the TextLayer positioning in PDF
-    renderer.setStyles(`
-      html, body {
-        background-color: ${bgColor} !important;
-      }
-    `);
+    // Fixed layout (PDF/CBZ) owns its scroll container inside a closed shadow root.
+    // Pass the app theme through a custom property without recolouring the page itself.
+    renderer.style.setProperty("--readany-fixed-layout-background", bgColor);
+    renderer.style.colorScheme = theme === "dark" ? "dark" : "light";
     return;
   }
+
+  if (!renderer.setStyles) return;
 
   // Apply CSS string styles
   syncRemoteFontStyles(view, settings);

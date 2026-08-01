@@ -67,6 +67,7 @@ export class FixedLayout extends HTMLElement {
             justify-content: safe center;
             align-items: safe center;
             overflow: auto;
+            background: var(--readany-fixed-layout-background, transparent);
         }
         :host([flow="scrolled"]) {
             display: block;
@@ -75,6 +76,30 @@ export class FixedLayout extends HTMLElement {
             overflow: auto;
             overscroll-behavior: contain;
             scrollbar-gutter: stable;
+            scrollbar-color: rgba(116, 103, 82, .42)
+                var(--readany-fixed-layout-background, transparent);
+            scrollbar-width: thin;
+        }
+        :host([flow="scrolled"])::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+            background: var(--readany-fixed-layout-background, transparent);
+        }
+        :host([flow="scrolled"])::-webkit-scrollbar-track,
+        :host([flow="scrolled"])::-webkit-scrollbar-track-piece,
+        :host([flow="scrolled"])::-webkit-scrollbar-corner {
+            background: var(--readany-fixed-layout-background, transparent);
+        }
+        :host([flow="scrolled"])::-webkit-scrollbar-thumb {
+            min-height: 48px;
+            border: 3px solid transparent;
+            border-radius: 999px;
+            background: rgba(116, 103, 82, .42);
+            background-clip: content-box;
+        }
+        :host([flow="scrolled"])::-webkit-scrollbar-thumb:hover {
+            background: rgba(116, 103, 82, .62);
+            background-clip: content-box;
         }
         #scroll-stack {
             display: flex;
